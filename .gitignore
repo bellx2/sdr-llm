@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 環境変数（秘密情報）
+.env
+
+# 録音ファイル
+recordings/
+
+# 執筆中の記事ドラフト（未公開）
+article.md
+
+# エディタ設定
+.vscode/settings.json

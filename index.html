@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RTL-SDR / AmiVoice + Gemini</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Noto+Sans+JP:wght@300;400&display=swap');
+
+  :root {
+    --bg:        #0a0e0a;
+    --panel:     #0f150f;
+    --border:    #1e2e1e;
+    --green:     #39ff6a;
+    --green-dim: #1a7a35;
+    --amber:     #ffb300;
+    --amber-dim: #6a4a00;
+    --blue:      #4fc3f7;
+    --blue-dim:  #0a3a50;
+    --text:      #c8e6c9;
+    --muted:     #4a6a4a;
+    --interim:   #7ec880;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text);
+               font-family: 'Noto Sans JP', sans-serif; font-weight: 300; }
+
+  body {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    grid-template-columns: 1fr 380px;
+    grid-template-areas: "header header" "log ai" "footer footer";
+    min-height: 100vh; padding: 20px; gap: 16px;
+  }
+
+  /* ヘッダー */
+  header {
+    grid-area: header;
+    display: flex; align-items: baseline; gap: 16px;
+    border-bottom: 1px solid var(--border); padding-bottom: 12px;
+  }
+  .callsign { font-family: 'Share Tech Mono', monospace; font-size: 1.4rem;
+               color: var(--green); letter-spacing: 0.15em; }
+  .freq-display { font-family: 'Share Tech Mono', monospace; font-size: 0.85rem;
+                  color: var(--amber); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+                display: inline-block; margin-left: auto; transition: background 0.3s; }
+  .status-dot.active { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .status-dot.error  { background: #ff4444; }
+  #status-text { font-family: 'Share Tech Mono', monospace; font-size: 0.75rem;
+                 color: var(--muted); margin-left: 8px; }
+
+  /* ログエリア */
+  #log {
+    grid-area: log;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 2px;
+    padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+  }
+  .entry { display: grid; grid-template-columns: 6.5em 1fr; gap: 12px;
+           align-items: baseline; border-bottom: 1px solid var(--border);
+           padding-bottom: 8px; animation: fadein 0.2s ease; }
+  @keyframes fadein { from { opacity:0; transform:translateY(4px); } to { opacity:1; } }
+  .entry.interim { opacity: 0.55; }
+  .entry-time { font-family: 'Share Tech Mono', monospace; font-size: 0.7rem;
+                color: var(--muted); white-space: nowrap; }
+  .entry-text { font-size: 0.95rem; line-height: 1.6; color: var(--text); word-break: break-all; }
+  .entry.interim .entry-text { color: var(--interim); }
+
+  /* AI パネル */
+  #ai-panel {
+    grid-area: ai;
+    background: var(--panel); border: 1px solid var(--amber-dim); border-radius: 2px;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #ai-header {
+    font-family: 'Share Tech Mono', monospace; font-size: 0.7rem;
+    color: var(--amber); letter-spacing: 0.12em;
+    padding: 10px 14px; border-bottom: 1px solid var(--amber-dim);
+    display: flex; align-items: center; gap: 8px;
+  }
+  #ai-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber-dim); transition: background 0.3s; }
+  #ai-dot.thinking { background: var(--amber); box-shadow: 0 0 6px var(--amber);
+                     animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+  #ai-next { font-family: 'Share Tech Mono', monospace; font-size: 0.65rem;
+             color: var(--muted); margin-left: auto; }
+  #ai-summaries { flex: 1; overflow-y: auto; padding: 14px;
+                  display: flex; flex-direction: column; gap: 16px; }
+
+  /* 要約カード */
+  .summary-card { border: 1px solid var(--amber-dim); border-radius: 2px;
+                  padding: 12px; animation: fadein 0.3s ease; }
+  .summary-meta { font-family: 'Share Tech Mono', monospace; font-size: 0.65rem;
+                  color: var(--muted); margin-bottom: 8px; }
+  .summary-text { font-size: 0.85rem; line-height: 1.75; color: var(--text);
+                  white-space: pre-wrap; word-break: break-all; margin-bottom: 10px; }
+  .topics { margin-bottom: 10px; }
+  .topic-item { font-size: 0.8rem; color: var(--amber); line-height: 1.8;
+                padding-left: 1em; text-indent: -1em; }
+  .topic-item::before { content: "· "; }
+
+  /* 交信ログテーブル */
+  .calls-title { font-family: 'Share Tech Mono', monospace; font-size: 0.65rem;
+                 color: var(--blue); letter-spacing: 0.1em; margin-bottom: 6px; }
+  .calls-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+  .calls-table th { font-family: 'Share Tech Mono', monospace; font-size: 0.6rem;
+                    color: var(--muted); text-align: left; padding: 3px 6px 3px 0;
+                    border-bottom: 1px solid var(--border); font-weight: 300; }
+  .calls-table td { padding: 4px 6px 4px 0; vertical-align: top;
+                    border-bottom: 1px solid var(--border); color: var(--text); line-height: 1.5; }
+  .calls-table tr:last-child td { border-bottom: none; }
+  .badge { font-family: 'Share Tech Mono', monospace; font-size: 0.6rem;
+           padding: 1px 6px; border-radius: 2px; display: inline-block; }
+  .badge-cq { background: var(--green-dim); color: var(--green); }
+  .badge-ind { background: var(--blue-dim); color: var(--blue); }
+  .null-val { color: var(--muted); font-style: italic; }
+
+  #ai-empty { font-family: 'Share Tech Mono', monospace; font-size: 0.75rem;
+              color: var(--muted); text-align: center; margin: auto; }
+
+  /* フッター */
+  footer { grid-area: footer; display: flex; align-items: center; gap: 12px;
+           border-top: 1px solid var(--border); padding-top: 10px; }
+  button.ctrl { font-family: 'Share Tech Mono', monospace; font-size: 0.75rem;
+                background: none; border: 1px solid var(--border); color: var(--muted);
+                padding: 4px 12px; cursor: pointer; letter-spacing: 0.1em;
+                transition: color 0.2s, border-color 0.2s; }
+  button.ctrl:hover { color: var(--green); border-color: var(--green-dim); }
+  #count { font-family: 'Share Tech Mono', monospace; font-size: 0.7rem;
+           color: var(--muted); margin-left: auto; }
+
+  #log::-webkit-scrollbar, #ai-summaries::-webkit-scrollbar { width: 4px; }
+  #log::-webkit-scrollbar-track, #ai-summaries::-webkit-scrollbar-track { background: var(--bg); }
+  #log::-webkit-scrollbar-thumb { background: var(--green-dim); border-radius: 2px; }
+  #ai-summaries::-webkit-scrollbar-thumb { background: var(--amber-dim); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="callsign">RTL-SDR RX</span>
+  <span class="freq-display" id="freq-display">— MHz · FM</span>
+  <span class="status-dot" id="dot"></span>
+  <span id="status-text">未接続</span>
+</header>
+
+<div id="log">
+  <div class="entry" style="border:none;">
+    <span class="entry-time"></span>
+    <span class="entry-text" style="color:var(--muted);font-size:0.8rem;">サーバーへの接続を待っています…</span>
+  </div>
+</div>
+
+<div id="ai-panel">
+  <div id="ai-header">
+    <span id="ai-dot"></span>
+    GEMINI ANALYSIS
+    <span id="ai-next">次の解析まで —</span>
+  </div>
+  <div id="ai-summaries">
+    <div id="ai-empty">1分ごとに要約と交信ログが表示されます</div>
+  </div>
+</div>
+
+<footer>
+  <button class="ctrl" onclick="clearLog()">CLEAR LOG</button>
+  <button class="ctrl" onclick="clearSummaries()">CLEAR AI</button>
+  <span id="count">0 件</span>
+</footer>
+
+<script>
+const WS_URL = "ws://localhost:8765";
+const BUFFER_SECONDS = 60;
+
+const log     = document.getElementById("log");
+const dot     = document.getElementById("dot");
+const stText  = document.getElementById("status-text");
+const count   = document.getElementById("count");
+const aiDot   = document.getElementById("ai-dot");
+const aiNext  = document.getElementById("ai-next");
+const aiSums  = document.getElementById("ai-summaries");
+const aiEmpty = document.getElementById("ai-empty");
+const freqDisp = document.getElementById("freq-display");
+
+let totalFinal = 0, interimEl = null, timerInterval = null;
+
+function formatFrequency(freq) {
+  if (!freq) return "— MHz";
+  if (freq.endsWith("M")) return `${freq.slice(0, -1)} MHz`;
+  if (freq.endsWith("k")) return `${freq.slice(0, -1)} kHz`;
+  return freq;
+}
+
+function setFrequency(freq, mode) {
+  const label = mode || "FM";
+  freqDisp.textContent = `${formatFrequency(freq)} · ${label}`;
+}
+
+function setStatus(state, text) {
+  dot.className = "status-dot " + state;
+  stText.textContent = text;
+}
+
+function addEntry(time, text, isInterim) {
+  if (isInterim) {
+    if (!interimEl) {
+      interimEl = document.createElement("div");
+      interimEl.className = "entry interim";
+      interimEl.innerHTML = `<span class="entry-time"></span><span class="entry-text"></span>`;
+      log.appendChild(interimEl);
+    }
+    interimEl.querySelector(".entry-time").textContent = time;
+    interimEl.querySelector(".entry-text").textContent = text;
+  } else {
+    const el = interimEl || document.createElement("div");
+    el.className = "entry";
+    el.innerHTML = `<span class="entry-time">${esc(time)}</span><span class="entry-text">${esc(text)}</span>`;
+    if (!interimEl) log.appendChild(el);
+    interimEl = null;
+    totalFinal++;
+    count.textContent = `${totalFinal} 件`;
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+function buildCallsTable(calls) {
+  if (!calls || calls.length === 0) return "";
+  const rows = calls.map(c => {
+    const badge = c.type === "CQ"
+      ? `<span class="badge badge-cq">CQ</span>`
+      : `<span class="badge badge-ind">個別</span>`;
+    const from = c.from ? esc(c.from) : `<span class="null-val">不明</span>`;
+    const to   = c.to   ? esc(c.to)   : `<span class="null-val">${c.type === "CQ" ? "不特定" : "不明"}</span>`;
+    const note = c.note ? `<br><span style="font-size:0.72rem;color:var(--muted)">${esc(c.note)}</span>` : "";
+    return `<tr>
+      <td>${esc(c.time)}</td>
+      <td>${badge}</td>
+      <td>${from}</td>
+      <td>${to}${note}</td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="calls-title">CALL LOG</div>
+    <table class="calls-table">
+      <thead><tr>
+        <th>時刻</th><th>種別</th><th>発信者</th><th>受信者</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function addSummary(msg) {
+  aiEmpty.style.display = "none";
+  const topics = (msg.topics || [])
+    .map(t => `<div class="topic-item">${esc(t)}</div>`).join("");
+  const callsHtml = buildCallsTable(msg.calls);
+
+  const card = document.createElement("div");
+  card.className = "summary-card";
+  card.innerHTML = `
+    <div class="summary-meta">${esc(msg.from)} 〜 ${esc(msg.to)}　${msg.count}件の発話</div>
+    <div class="summary-text">${esc(msg.summary)}</div>
+    ${topics ? `<div class="topics">${topics}</div>` : ""}
+    ${callsHtml}
+  `;
+  aiSums.prepend(card);
+  aiSums.scrollTop = 0;
+}
+
+function esc(s) {
+  if (s == null) return "";
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function startTimer() {
+  if (timerInterval) clearInterval(timerInterval);
+  const deadline = Date.now() + BUFFER_SECONDS * 1000;
+  timerInterval = setInterval(() => {
+    const rem = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    const m = String(Math.floor(rem / 60)).padStart(2, "0");
+    const s = String(rem % 60).padStart(2, "0");
+    aiNext.textContent = `次の解析まで ${m}:${s}`;
+    if (rem === 0) clearInterval(timerInterval);
+  }, 1000);
+}
+
+function clearLog() {
+  log.innerHTML = ""; interimEl = null; totalFinal = 0; count.textContent = "0 件";
+}
+function clearSummaries() {
+  aiSums.innerHTML = `<div id="ai-empty">1分ごとに要約と交信ログが表示されます</div>`;
+}
+
+function connect() {
+  setStatus("", "接続中...");
+  const ws = new WebSocket(WS_URL);
+  ws.onopen  = () => { setStatus("active", "接続済み"); log.innerHTML = ""; startTimer(); };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if      (msg.type === "config")     { setFrequency(msg.frequency, msg.mode); }
+    else if (msg.type === "result")     addEntry(msg.time, msg.text, !msg.final);
+    else if (msg.type === "status")     setStatus("active", msg.text);
+    else if (msg.type === "ai_thinking"){ aiDot.className = "thinking"; aiNext.textContent = "Gemini 解析中..."; }
+    else if (msg.type === "ai_summary") { aiDot.className = ""; addSummary(msg); startTimer(); }
+    else if (msg.type === "error")      { setStatus("error", msg.text); aiDot.className = ""; }
+  };
+  ws.onclose = () => {
+    setStatus("error", "切断 — 3秒後に再接続");
+    if (timerInterval) clearInterval(timerInterval);
+    aiNext.textContent = "次の解析まで —";
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+connect();
+</script>
+</body>
+</html>
