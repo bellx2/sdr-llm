@@ -171,7 +171,7 @@
 
 <script>
 const WS_URL = "ws://localhost:8765";
-const BUFFER_SECONDS = 60;
+let bufferSeconds = 60; // サーバから config メッセージで上書きされる
 
 const log     = document.getElementById("log");
 const dot     = document.getElementById("dot");
@@ -203,20 +203,16 @@ function setStatus(state, text) {
 }
 
 function addEntry(time, text, isInterim) {
-  if (isInterim) {
-    if (!interimEl) {
-      interimEl = document.createElement("div");
-      interimEl.className = "entry interim";
-      interimEl.innerHTML = `<span class="entry-time"></span><span class="entry-text"></span>`;
-      log.appendChild(interimEl);
-    }
-    interimEl.querySelector(".entry-time").textContent = time;
-    interimEl.querySelector(".entry-text").textContent = text;
-  } else {
-    const el = interimEl || document.createElement("div");
-    el.className = "entry";
-    el.innerHTML = `<span class="entry-time">${esc(time)}</span><span class="entry-text">${esc(text)}</span>`;
-    if (!interimEl) log.appendChild(el);
+  // interim / final どちらも同じ要素を使い回し、textContent だけ差し替える
+  if (!interimEl) {
+    interimEl = document.createElement("div");
+    interimEl.innerHTML = `<span class="entry-time"></span><span class="entry-text"></span>`;
+    log.appendChild(interimEl);
+  }
+  interimEl.className = isInterim ? "entry interim" : "entry";
+  interimEl.querySelector(".entry-time").textContent = time;
+  interimEl.querySelector(".entry-text").textContent = text;
+  if (!isInterim) {
     interimEl = null;
     totalFinal++;
     count.textContent = `${totalFinal} 件`;
@@ -276,7 +272,7 @@ function esc(s) {
 
 function startTimer() {
   if (timerInterval) clearInterval(timerInterval);
-  const deadline = Date.now() + BUFFER_SECONDS * 1000;
+  const deadline = Date.now() + bufferSeconds * 1000;
   timerInterval = setInterval(() => {
     const rem = Math.max(0, Math.round((deadline - Date.now()) / 1000));
     const m = String(Math.floor(rem / 60)).padStart(2, "0");
@@ -290,7 +286,10 @@ function clearLog() {
   log.innerHTML = ""; interimEl = null; totalFinal = 0; count.textContent = "0 件";
 }
 function clearSummaries() {
-  aiSums.innerHTML = `<div id="ai-empty">1分ごとに要約と交信ログが表示されます</div>`;
+  // 要約カードだけ消し、空状態プレースホルダの要素は使い回す
+  aiSums.innerHTML = "";
+  aiSums.appendChild(aiEmpty);
+  aiEmpty.style.display = "";
 }
 
 function connect() {
@@ -299,7 +298,10 @@ function connect() {
   ws.onopen  = () => { setStatus("active", "接続済み"); log.innerHTML = ""; startTimer(); };
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if      (msg.type === "config")     { setFrequency(msg.frequency, msg.mode); }
+    if      (msg.type === "config")     {
+      setFrequency(msg.frequency, msg.mode);
+      if (msg.buffer_seconds) bufferSeconds = msg.buffer_seconds;
+    }
     else if (msg.type === "result")     addEntry(msg.time, msg.text, !msg.final);
     else if (msg.type === "status")     setStatus("active", msg.text);
     else if (msg.type === "ai_thinking"){ aiDot.className = "thinking"; aiNext.textContent = "Gemini 解析中..."; }

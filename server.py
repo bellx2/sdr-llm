@@ -40,7 +40,7 @@ def _require_env(name: str) -> str:
 
 # ===== 設定 =====
 FREQUENCY       = "433.00M"
-SAMPLE_RATE_OUT = "16000"
+SAMPLE_RATE_HZ  = 16000
 FM_BANDWIDTH    = os.getenv("FM_BANDWIDTH", "25k")   # NBFM: 12.5k / 25k（15kは非標準で歪みやすい）
 GAIN            = os.getenv("RTL_GAIN", "0")         # 0=自動ゲイン
 RTL_PPM         = os.getenv("RTL_PPM", "0")        # 周波数補正（例: 50）
@@ -102,7 +102,7 @@ def _validate_api_keys():
 def _print_rx_params():
     print(
         f"[受信設定] {FREQUENCY} · FM bandwidth={FM_BANDWIDTH} "
-        f"· gain={GAIN} · ppm={RTL_PPM} · audio={SAMPLE_RATE_OUT}Hz"
+        f"· gain={GAIN} · ppm={RTL_PPM} · audio={SAMPLE_RATE_HZ}Hz"
     )
 
 
@@ -120,11 +120,10 @@ async def browser_handler(websocket):
 
 
 def _browser_config() -> dict:
-    mode = "NBFM" if FM_BANDWIDTH in ("12.5k", "15k", "25k") else "FM"
     return {
         "type": "config",
         "frequency": FREQUENCY,
-        "mode": mode,
+        "mode": "NBFM",
         "buffer_seconds": BUFFER_SECONDS,
     }
 
@@ -138,7 +137,7 @@ async def broadcast(message: dict):
     )
 
 # ===== Gemini 呼び出し =====
-async def call_gemini(text_log: str) -> dict:
+async def call_gemini(client: httpx.AsyncClient, text_log: str) -> dict:
     """ログを送り、{summary, topics, calls} のdictを返す。"""
     payload = {
         "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
@@ -151,11 +150,10 @@ async def call_gemini(text_log: str) -> dict:
             "responseMimeType": "application/json",   # JSON出力を強制
         },
     }
-    url = f"{GEMINI_API_URL}?key={_require_env('GEMINI_API_KEY')}"
-    async with httpx.AsyncClient(timeout=40) as client:
-        resp = await client.post(url, json=payload,
-                                 headers={"Content-Type": "application/json"})
-        resp.raise_for_status()
+    url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}"
+    resp = await client.post(url, json=payload,
+                             headers={"Content-Type": "application/json"})
+    resp.raise_for_status()
 
     raw = (resp.json()
                .get("candidates", [{}])[0]
@@ -179,7 +177,7 @@ async def call_gemini(text_log: str) -> dict:
 text_buffer: list[dict] = []
 buffer_lock = asyncio.Lock()
 
-async def gemini_summarizer():
+async def gemini_summarizer(client: httpx.AsyncClient):
     while True:
         await asyncio.sleep(BUFFER_SECONDS)
 
@@ -197,7 +195,7 @@ async def gemini_summarizer():
         await broadcast({"type": "ai_thinking", "text": "Geminiが解析中..."})
 
         try:
-            result = await call_gemini(log)
+            result = await call_gemini(client, log)
             print(f"[Gemini] 完了: {len(result['calls'])}件の交信を検出")
             await broadcast({
                 "type":    "ai_summary",
@@ -271,6 +269,13 @@ async def _append_text_buffer(time: str, text: str):
         text_buffer.append({"time": time, "text": text})
 
 
+def _post_status(loop: asyncio.AbstractEventLoop, text: str):
+    """別スレッドからブラウザに status を投げる定型を一箇所にまとめる。"""
+    asyncio.run_coroutine_threadsafe(
+        broadcast({"type": "status", "text": text}), loop
+    ).result()
+
+
 def _amivoice_worker(sync_queue: queue.Queue, loop: asyncio.AbstractEventLoop):
     """Wrp は同期 API のため専用スレッドで実行する。"""
     while True:
@@ -280,17 +285,13 @@ def _amivoice_worker(sync_queue: queue.Queue, loop: asyncio.AbstractEventLoop):
         wrp.setServerURL(AMIVOICE_SERVER_URL)
         wrp.setCodec(AMIVOICE_CODEC)
         wrp.setGrammarFileNames(AMIVOICE_GRAMMAR)
-        wrp.setAuthorization(_require_env("AMIVOICE_APP_KEY"))
+        wrp.setAuthorization(AMIVOICE_APP_KEY)
 
-        asyncio.run_coroutine_threadsafe(
-            broadcast({"type": "status", "text": "AmiVoice接続中..."}), loop
-        ).result()
+        _post_status(loop, "AmiVoice接続中...")
 
         if not wrp.connect():
             print(f"[AmiVoice] 接続失敗: {wrp.getLastMessage()}")
-            asyncio.run_coroutine_threadsafe(
-                broadcast({"type": "status", "text": "再接続中..."}), loop
-            ).result()
+            _post_status(loop, "再接続中...")
             wrp.sleep(3000)
             continue
 
@@ -300,9 +301,7 @@ def _amivoice_worker(sync_queue: queue.Queue, loop: asyncio.AbstractEventLoop):
             wrp.sleep(3000)
             continue
 
-        asyncio.run_coroutine_threadsafe(
-            broadcast({"type": "status", "text": "受信中..."}), loop
-        ).result()
+        _post_status(loop, "受信中...")
 
         disconnected = False
         while True:
@@ -324,22 +323,12 @@ def _amivoice_worker(sync_queue: queue.Queue, loop: asyncio.AbstractEventLoop):
 
         wrp.disconnect()
         if disconnected:
-            asyncio.run_coroutine_threadsafe(
-                broadcast({"type": "status", "text": "再接続中..."}), loop
-            ).result()
+            _post_status(loop, "再接続中...")
             wrp.sleep(3000)
 
 
-async def _audio_bridge(audio_queue: asyncio.Queue, sync_queue: queue.Queue):
-    """asyncio.Queue → queue.Queue へ音声チャンクを転送する。"""
-    while True:
-        sync_queue.put(await audio_queue.get())
-
-
-async def amivoice_stream(audio_queue: asyncio.Queue):
+async def amivoice_stream(sync_queue: queue.Queue):
     loop = asyncio.get_running_loop()
-    sync_queue: queue.Queue = queue.Queue(maxsize=50)
-    asyncio.create_task(_audio_bridge(audio_queue, sync_queue))
     threading.Thread(
         target=_amivoice_worker, args=(sync_queue, loop), daemon=True
     ).start()
@@ -359,7 +348,7 @@ class PcmRecorder:
         self._wav = wave.open(str(self.path), "wb")
         self._wav.setnchannels(1)
         self._wav.setsampwidth(2)
-        self._wav.setframerate(int(SAMPLE_RATE_OUT))
+        self._wav.setframerate(SAMPLE_RATE_HZ)
 
     def write(self, chunk: bytes):
         if not chunk or self._wav is None:
@@ -379,7 +368,7 @@ class PcmRecorder:
         samples = struct.unpack(f"<{len(pcm) // 2}h", pcm)
         peak = max(abs(s) for s in samples)
         rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
-        secs = self._bytes / (int(SAMPLE_RATE_OUT) * 2)
+        secs = self._bytes / (SAMPLE_RATE_HZ * 2)
         print(f"[録音] {self.path} ({secs:.1f}秒)")
         print(f"[録音] peak={peak} rms={rms:.0f}  ※peakが数百未満なら無音/弱信号の可能性")
 
@@ -387,7 +376,7 @@ class PcmRecorder:
 def _build_rtl_fm_cmd() -> list[str]:
     cmd = [
         "rtl_fm", "-f", FREQUENCY, "-M", "fm",
-        "-s", FM_BANDWIDTH, "-r", SAMPLE_RATE_OUT,
+        "-s", FM_BANDWIDTH, "-r", str(SAMPLE_RATE_HZ),
         "-g", GAIN, "-l", "0", "-E", "dc",
     ]
     if RTL_PPM != "0":
@@ -406,15 +395,25 @@ async def _rtl_fm_stderr_reader(proc: asyncio.subprocess.Process):
             print(f"[rtl_fm] {text}")
 
 
-async def rtl_fm_reader(
-    audio_queue: asyncio.Queue | None,
-    recorder: PcmRecorder | None = None,
-):
+async def _spawn_rtl_fm() -> asyncio.subprocess.Process:
     cmd = _build_rtl_fm_cmd()
     print(f"[rtl_fm] 起動: {' '.join(cmd)}")
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     asyncio.create_task(_rtl_fm_stderr_reader(proc))
+    return proc
+
+
+async def rtl_fm_reader(sync_queue: queue.Queue, record_path: Path | None = None):
+    """rtl_fm の PCM を AmiVoice キューへ流す。record_path 指定時は同時録音する。"""
+    recorder = None
+    if record_path:
+        recorder = PcmRecorder(record_path)
+        recorder.open()
+        print(f"[録音] 同時記録: {record_path}")
+
+    proc = await _spawn_rtl_fm()
+    loop = asyncio.get_running_loop()
     try:
         while True:
             chunk = await proc.stdout.read(CHUNK_BYTES)
@@ -422,12 +421,16 @@ async def rtl_fm_reader(
                 break
             if recorder:
                 recorder.write(chunk)
-            if audio_queue is not None:
-                await audio_queue.put(chunk)
+            try:
+                sync_queue.put_nowait(chunk)
+            except queue.Full:
+                # AmiVoice 側が詰まった時だけ executor で待ってバックプレッシャを保つ
+                await loop.run_in_executor(None, sync_queue.put, chunk)
     finally:
         proc.terminate()
-        if audio_queue is not None:
-            await audio_queue.put(None)
+        if recorder:
+            recorder.close()
+        await loop.run_in_executor(None, sync_queue.put, None)
 
 
 async def record_only(path: Path, duration: float):
@@ -437,15 +440,11 @@ async def record_only(path: Path, duration: float):
     recorder.open()
     print(f"[録音] {duration:.0f}秒間記録します…")
 
-    cmd = _build_rtl_fm_cmd()
-    print(f"[rtl_fm] 起動: {' '.join(cmd)}")
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    asyncio.create_task(_rtl_fm_stderr_reader(proc))
-
+    proc = await _spawn_rtl_fm()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + duration
     try:
-        end_at = asyncio.get_running_loop().time() + duration
-        while asyncio.get_running_loop().time() < end_at:
+        while loop.time() < deadline:
             chunk = await proc.stdout.read(CHUNK_BYTES)
             if not chunk:
                 print("[rtl_fm] 出力が途切れました")
@@ -480,25 +479,19 @@ async def main(record_path: Path | None = None):
     _validate_api_keys()
     _print_rx_params()
 
-    audio_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
-    recorder = None
-    if record_path:
-        recorder = PcmRecorder(record_path)
-        recorder.open()
-        print(f"[録音] 同時記録: {record_path}")
+    sync_queue: queue.Queue = queue.Queue(maxsize=50)
 
     browser_server = await websockets.server.serve(
         browser_handler, "localhost", BROWSER_WS_PORT)
     print(f"[Server] ws://localhost:{BROWSER_WS_PORT}  Gemini: {BUFFER_SECONDS//60}分ごと")
     try:
-        await asyncio.gather(
-            rtl_fm_reader(audio_queue, recorder),
-            amivoice_stream(audio_queue),
-            gemini_summarizer(),
-        )
+        async with httpx.AsyncClient(timeout=40) as gemini_client:
+            await asyncio.gather(
+                rtl_fm_reader(sync_queue, record_path),
+                amivoice_stream(sync_queue),
+                gemini_summarizer(gemini_client),
+            )
     finally:
-        if recorder:
-            recorder.close()
         browser_server.close()
         await browser_server.wait_closed()
 
