@@ -29,7 +29,14 @@ cp .env.sample .env
 
 ```bash
 uv run server.py
-# ブラウザで index.html を開く
+# ブラウザで http://localhost:8765 を開く
+```
+
+周波数は起動引数で指定できる（末尾の `M` は省略可）。
+
+```bash
+uv run server.py -f 145.000      # 145.000 MHz
+uv run server.py -f 433.10M      # 433.10 MHz
 ```
 
 ## 受信パラメータの確認

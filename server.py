@@ -17,7 +17,8 @@ from pathlib import Path
 
 import httpx
 import websockets
-import websockets.server
+import websockets.http11
+from websockets.datastructures import Headers
 from dotenv import load_dotenv
 
 # AmiVoice 公式 Wrp クライアントライブラリ
@@ -108,6 +109,23 @@ def _print_rx_params():
 
 # ===== ブラウザ接続管理 =====
 browser_clients: set = set()
+INDEX_HTML_PATH = Path(__file__).parent / "index.html"
+
+
+def _http_handler(connection, request):
+    """同一ポートで index.html を配信する。WebSocket 要求はそのまま通す。"""
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return None
+    if request.path in ("/", "/index.html"):
+        body = INDEX_HTML_PATH.read_bytes()
+        return websockets.http11.Response(200, "OK", Headers([
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Content-Length", str(len(body))),
+        ]), body)
+    return websockets.http11.Response(
+        404, "Not Found", Headers([("Content-Length", "0")]), b"",
+    )
+
 
 async def browser_handler(websocket):
     browser_clients.add(websocket)
@@ -461,6 +479,10 @@ def parse_args() -> argparse.Namespace:
         description="RTL-SDR FM受信 → AmiVoice → Gemini → ブラウザ"
     )
     parser.add_argument(
+        "-f", "--frequency", default=FREQUENCY,
+        help=f"受信周波数 (例: 433.000M / 145.000M)。既定: {FREQUENCY}",
+    )
+    parser.add_argument(
         "--record", metavar="FILE",
         help="受信音声を WAV に同時記録（通常起動時）",
     )
@@ -481,9 +503,11 @@ async def main(record_path: Path | None = None):
 
     sync_queue: queue.Queue = queue.Queue(maxsize=50)
 
-    browser_server = await websockets.server.serve(
-        browser_handler, "localhost", BROWSER_WS_PORT)
-    print(f"[Server] ws://localhost:{BROWSER_WS_PORT}  Gemini: {BUFFER_SECONDS//60}分ごと")
+    browser_server = await websockets.serve(
+        browser_handler, "localhost", BROWSER_WS_PORT,
+        process_request=_http_handler,
+    )
+    print(f"[Server] http://localhost:{BROWSER_WS_PORT}  Gemini: {BUFFER_SECONDS//60}分ごと")
     try:
         async with httpx.AsyncClient(timeout=40) as gemini_client:
             await asyncio.gather(
@@ -498,6 +522,8 @@ async def main(record_path: Path | None = None):
 
 if __name__ == "__main__":
     args = parse_args()
+    # 末尾に単位がなければ MHz を補う (433.10 -> 433.10M)
+    FREQUENCY = args.frequency if args.frequency[-1:].isalpha() else args.frequency + "M"
     if args.record_only:
         asyncio.run(record_only(Path(args.record_only), args.duration))
     else:
