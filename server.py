@@ -40,7 +40,7 @@ def _require_env(name: str) -> str:
 
 
 # ===== 設定 =====
-FREQUENCY       = "433.00M"
+FREQUENCY: str  # CLI -f で必須指定。__main__ で代入される
 SAMPLE_RATE_HZ  = 16000
 FM_BANDWIDTH    = os.getenv("FM_BANDWIDTH", "25k")   # NBFM: 12.5k / 25k（15kは非標準で歪みやすい）
 GAIN            = os.getenv("RTL_GAIN", "0")         # 0=自動ゲイン
@@ -479,8 +479,8 @@ def parse_args() -> argparse.Namespace:
         description="RTL-SDR FM受信 → AmiVoice → Gemini → ブラウザ"
     )
     parser.add_argument(
-        "-f", "--frequency", default=FREQUENCY,
-        help=f"受信周波数 (例: 433.000M / 145.000M)。既定: {FREQUENCY}",
+        "-f", "--frequency", required=True,
+        help="受信周波数 (例: 433.10M / 145.000)。末尾の M は省略可",
     )
     parser.add_argument(
         "--record", metavar="FILE",

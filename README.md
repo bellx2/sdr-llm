@@ -27,16 +27,12 @@ cp .env.sample .env
 
 ## 実行
 
+受信周波数は `-f` で必須指定（末尾の `M` は省略可）。
+
 ```bash
-uv run server.py
+uv run server.py -f 433.00       # 433.00 MHz
+uv run server.py -f 145.00M      # 145.00 MHz
 # ブラウザで http://localhost:8765 を開く
-```
-
-周波数は起動引数で指定できる（末尾の `M` は省略可）。
-
-```bash
-uv run server.py -f 145.000      # 145.000 MHz
-uv run server.py -f 433.10M      # 433.10 MHz
 ```
 
 ## 受信パラメータの確認
@@ -44,7 +40,7 @@ uv run server.py -f 433.10M      # 433.10 MHz
 API キー不要で rtl_fm の出力だけを WAV に保存できる。
 
 ```bash
-uv run server.py --record-only test.wav --duration 30
+uv run server.py --record-only test.wav --duration 30 -f 433.00
 ```
 
 録音終了時に `peak` / `rms` が表示される。`peak` が極端に低ければ無音または弱信号。
